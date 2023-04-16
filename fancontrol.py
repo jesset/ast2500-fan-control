@@ -5,91 +5,118 @@ import re
 import time
 import datetime
 
-# path to ipmitool
-ipmitool = '/usr/bin/ipmitool'
+import numpy as np
 
-# path to hddtemp
-hddtemp = '/usr/sbin/hddtemp'
+ipmitool = "/usr/bin/ipmitool"  # path to ipmitool (Fan speed monitoring/control)
+smartctl = "/usr/sbin/smartctl" # path to smartctl (HDD temperature)
+smi = "/usr/bin/nvidia-smi"     # path to nvidia-smi (GPU temperature/activity)
+lmSensors = "/usr/bin/sensors"  # path to sensors (CPU temperature)
 
 # list of disks to poll for temperature
-hdds = ['/dev/sda','/dev/sdb','/dev/sdc','/dev/sdd','/dev/sde','/dev/sdf','/dev/sdg','/dev/sdh']
+hdds = ['/dev/sda','/dev/sdb','/dev/sdc','/dev/sdd']
 
 # path to log file
 logfile = '/root/venv/fan_control/logs'
 
-# temperatures for cpu cooling override
-# script polls cpu temp once a second
-# if cpu temp goes above cpu_override_temp, all fans will be set to 100%
-# if cpu temp goes below cpu_normal_temp, cpu fan will return to 50%, hd fans will return to previous speed
-cpu_override_temp = 69
-cpu_normal_temp = 60
+# Object contains the temperature settings for each fan speed
+tempPoints = {
+    "cpu": [40, 60, 80],
+    "hdds": [20, 37, 45, 50],
+    "gpu": [50, 60, 70]
+}
 
-# normal cpu fan speed, as a % of max
-# this value is set when the script starts and when not in cpu temperature override mode
-cpu_fan_default = 50
+# Object contains the fan speed settings for each component
+fanSpeedPoints = {
+    "cpu": [25, 50, 100],
+    "hdds": [15, 35, 50, 100],
+    "gpu": [25, 50, 100]
+}
 
-# hd temperature polling interval in seconds
-hd_poll = 180
+# Current fan speed (in RPM)
 
-# hd fan speeds, expressed as % of max
-hd_fans_default = 50
-hd_fans_hi = 100
-hd_fans_medhi = 75
-hd_fans_medlo = 50
-hd_fans_lo = 25
+# The current, minimum, and maximum fan speeds
+# cpu, rear, front1, front2, front3, front4
+# cpu, rear, gpu,    top,    bottom, chipset
+fanSpeeds = {
+    "current" : [0,0,0,0,0,0],
+    "min" : [1,1,1,1,1,1],
+    "max" : [2,2,2,2,2,2]
+}
+fanSpeedRe = [
+    r"^CPU_FAN1.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$",
+    r"^REAR_FAN1.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$",
+    r"^FRONT_FAN1.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$",
+    r"^FRONT_FAN2.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$",
+    r"^FRONT_FAN3.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$",
+    r"^FRONT_FAN4.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$"
+]
 
-# hd target temperatures
-# if any hd temp >= hd_hi, hd_fans_hi will be set
-hd_hi = 41
-# if any hd temp == hd_medhi, hd_fans_medhi will be set
-hd_medhi = 40
-# if any hd temp == hd_medhi, hd_fans_medlo will be set
-hd_medlo = 39
-# if all hd temps <= hd_lo, hd_fans_lo will be set
-hd_lo = 38
+# get each hdd temperature
+# #!/bin/bash
+# DRIVEPATH="$1"
+# INFO="$(sudo smartctl -a $DRIVEPATH)"
+# TEMP=$(echo "$INFO" | grep '194 Temp' | awk '{print $10}')
+# if [[ $TEMP == '' ]]; then
+#   TEMP=$(echo "$INFO" | grep '190 Airflow' | awk '{print $10}')
+# fi
+# if [[ $TEMP == '' ]]; then
+#   TEMP=$(echo "$INFO" | grep 'Temperature Sensor 1:' | awk '{print $4}')
+# fi
+# if [[ $TEMP == '' ]]; then
+#   TEMP=$(echo "$INFO" | grep 'Current Drive Temperature:' | awk '{print $4}')
+# fi
+# if [[ $TEMP == '' ]]; then
+#   TEMP=$(echo "$INFO" | grep 'Temperature:' | awk '{print $2}')
+# fi
+# echo $TEMP
+
+# def get_fan_speed(temperature):
+#     if temperature < temp_points.min():
+#         return 0
+#     elif temperature > temp_points.max():
+#         return 100
+#     else:
+#         return np.interp(temperature, temp_points, fan_speed_points)
+
+# Current fan speed: ipmitool raw 0x3a 0x02
+
+# fan map : cpu, nc, rear_fan1(exhaust), nc, front_fan1(gpu), front_fan2(top hd), front_fan3(bottom hd), front_fan4 (uncontrolled, chipset)
+
 
 # various globals
 hdchecktime = time.time()
-currentcpufanspeed = hex(cpu_fan_default)
-currenthdfanspeed = hex(hd_fans_default)
-cpuoverride = False
-hdfanspeed = [ipmitool,'raw','0x3a','0x01',currentcpufanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed]
-allfanshigh = [ipmitool,'raw','0x3a','0x01','0x64','0x64','0x64','0x64','0x64','0x64','0x64','0x64']
-cputemp = re.compile(r'^CPU\sTemp.*\|\s([0-9][0-9])\sdegrees\sC$', re.MULTILINE)
-cpufanspeed = re.compile(r'^FAN1.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$', re.MULTILINE)
-matchhdfanspeed = re.compile(r'^FAN3.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$', re.MULTILINE)
-exhaustfanspeed = re.compile(r'^FAN5.*\|\s([0-9][0-9][0-9]|[0-9][0-9][0-9][0-9])\sRPM$', re.MULTILINE)
-cpufan_max_speed = 3000
-hdfan_max_speed = 2800
-exhaustfan_max_speed = 2200
+# hdFanSpeed = [ipmitool,'raw','0x3a','0x01',currentcpufanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed,currenthdfanspeed]
 
-def log(message):
-    with open(logfile,'a') as log:
-        log.write(str(datetime.datetime.now()))
-        log.write(' ')
-        log.write(str(message))
-        log.write('\n')
+# def log(message):
+#     with open(logfile,'a') as log:
+#         log.write(str(datetime.datetime.now()))
+#         log.write(' ')
+#         log.write(str(message))
+#         log.write('\n')
 
-def getcpufanspeed():
+def getFanSpeeds():
     try:
-        time.sleep(3)
-        speed = subprocess.check_output([ipmitool,'sdr','type','Fan']).decode('utf-8')
-        speed = re.search(cpufanspeed, speed)
-        speed = speed.group(1)
-        return int(speed)
+        # Checks each fan speed and puts it into the current fan speed array
+        for i in range(len(fanSpeeds["current"])):
+            fanSpeeds["current"][i] = re.search(re.compile(fanSpeedRe[i], re.MULTILINE),).group(1)
+        return None
     except Exception as e:
-        log(e)
+        print(f"exception in get_cpu_fan_speed: {e}")
 
-def getcputemp():
+def getCpuTemp():
     try:
-        temp = subprocess.check_output([ipmitool,'sdr','type','Temperature']).decode('utf-8')
-        temp = re.search(cputemp, temp)
-        temp = temp.group(1)
-        return int(temp)
+        return int(
+            re.search(
+                re.compile(r'^CPU\sTemp.*\|\s([0-9][0-9])\sdegrees\sC$', re.MULTILINE), 
+                subprocess.check_output(
+                    [ipmitool,'sdr','type','Temperature']
+                ).decode('utf-8')
+            ).group(1)
+        )
     except Exception as e:
-        log(e)
-        subprocess.run(allfanshigh)
-        log('cpu temp detection failure, all fans set to 100%')
+        print(f"exception in get_cpu_temp: {e}")
+        # TODO set all fans to full
+        print(f"cpu temp detection failure, all fans set to 100%")
 
 def checkcputemp():
     global currentcpufanspeed
@@ -104,26 +131,6 @@ def checkcputemp():
             subprocess.run(hdfanspeed)
             cpuoverride = False
             log('cpu temp < '+str(cpu_normal_temp)+'C, cpu fan set to '+str(cpu_fan_default)+'%')
-    except Exception as e:
-        log(e)
-
-def gethdfanspeed():
-    try:
-        time.sleep(3)
-        speed = subprocess.check_output([ipmitool,'sdr','type','Fan']).decode('utf-8')
-        speed = re.search(matchhdfanspeed, speed)
-        speed = speed.group(1)
-        return int(speed)
-    except Exception as e:
-        log(e)
-
-def getexhaustfanspeed():
-    try:
-        time.sleep(3)
-        speed = subprocess.check_output([ipmitool,'sdr','type','Fan']).decode('utf-8')
-        speed = re.search(exhaustfanspeed, speed)
-        speed = speed.group(1)
-        return int(speed)
     except Exception as e:
         log(e)
 
