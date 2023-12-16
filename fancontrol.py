@@ -118,10 +118,9 @@ def getHddTemps():
         # Get HDD temperatures
         for h in range(len(hdds)):
             hddProc = subprocess.check_output([smartctl,"-a",hdds[h]]).decode("utf-8")
-            tempRe= re.search(re.compile(r"^.*194\sTemp.*\s(\d+)(?:\s[\(][^)]*[\)])?$", re.MULTILINE), hddProc).group(1)
-            if tempRe != None:
-                hddTemps[h] = int(re)
-            else:
+            try:
+                hddTemps[h] = int(re.search(re.compile(r"^.*194\sTemp.*\s(\d+)(?:\s[\(][^)]*[\)])?$", re.MULTILINE), hddProc).group(1))
+            except:
                 hddTemps[h] = 0
         
         # And get the hottest drive
