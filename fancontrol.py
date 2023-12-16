@@ -9,14 +9,18 @@ import numpy as np
 ipmitool = shutil.which("ipmitool")  # path to ipmitool (Fan speed monitoring/control)
 smartctl = shutil.which("smartctl") # path to smartctl (HDD temperature)
 smi = shutil.which("nvidia-smi")     # path to nvidia-smi (GPU temperature/activity)
+lsblk = shutil.which("lsblk")        # path to lsbl
 # lmSensors = shutil.which("sensors")  # path to sensors (CPU temperature)
 
 hddCheckInterval = 60
 cpuCheckInterval = 5
 
-# list of disks to poll for temperature
-hdds = ['/dev/sda','/dev/sdc']
-# TODO /dev/sdb and sdd output the temperature different, so another value is at the end (?)
+# Gets a list of hdds
+# Only get hdds (lsblk -I 8) and ignore partitions
+hdds = []
+hddList = subprocess.check_output([lsblk,"-o","NAME","-nl","-I","8","-d"]).decode("utf-8").split("\n")[:-1]
+for i in hddList:
+    hdds.append("/dev/{0}".format(i))
 
 # Current fan speed: ipmitool raw 0x3a 0x02
 # fan map: cpu, nc, rear_fan1(exhaust), nc, front_fan1(hdds), front_fan2(gpu), front_fan3(none), front_fan4 (uncontrolled, chipset)
@@ -114,7 +118,11 @@ def getHddTemps():
         # Get HDD temperatures
         for h in range(len(hdds)):
             hddProc = subprocess.check_output([smartctl,"-a",hdds[h]]).decode("utf-8")
-            hddTemps[h] = int(re.search(re.compile(r"^.*194\sTemp.*\s([0-9][0-9])$", re.MULTILINE), hddProc).group(1))
+            tempRe= re.search(re.compile(r"^.*194\sTemp.*\s(\d+)(?:\s[\(][^)]*[\)])?$", re.MULTILINE), hddProc).group(1)
+            if tempRe != None:
+                hddTemps[h] = int(re)
+            else:
+                hddTemps[h] = 0
         
         # And get the hottest drive
         tempReadings[1] = max(hddTemps)
@@ -159,6 +167,7 @@ def setFanSpeed():
     print([ipmitool,"raw","0x3a","0x01"]+fanSpeedHex)
     
     return None
+
 
 hddLastChecked = time.time()
 
